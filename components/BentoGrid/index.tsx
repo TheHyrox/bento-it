@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Block as BlockType } from '@/lib/types';
 import { FiTrash2, FiType, FiDroplet, FiPlus } from 'react-icons/fi';
 import Block from './Block';
@@ -14,6 +14,7 @@ interface BentoGridProps {
   isEditable: boolean;
   onUpdateBlock: (id: string, updates: Partial<BlockType>) => void;
   onAddBlock: (position: { x: number; y: number }) => void;
+  onUpdateBlock: (id: string, updates: Partial<BlockType>) => void;
 }
 
 export default function BentoGrid({ blocks, isEditable, onUpdateBlock, onAddBlock }: BentoGridProps) {
@@ -25,7 +26,20 @@ export default function BentoGrid({ blocks, isEditable, onUpdateBlock, onAddBloc
   const [isResizing, setIsResizing] = useState(false);
   const [resizeStartPos, setResizeStartPos] = useState<{ x: number, y: number } | null>(null);
   const [resizingBlock, setResizingBlock] = useState<BlockType | null>(null);
+  const [resizePreview, setResizePreview] = useState<{w: number, h: number} | null>(null);
+  const debounceTimer = useRef<NodeJS.Timeout>();
 
+  const VALID_SIZES = [
+    { w: 1, h: 1 }, // square
+    { w: 2, h: 1 }, // horizontal rectangle
+    { w: 1, h: 2 }, // vertical rectangle
+    { w: 2, h: 2 }, // big square
+    { w: 2, h: 3 }, // tall rectangle
+  ];
+
+  const handleUpdateContent = (blockId: string, content: string) => {
+    onUpdateBlock(blockId, { content });
+  };
 
   const handleMouseLeave = (e: React.MouseEvent, blockId: string) => {
     const relatedTarget = e.relatedTarget;
@@ -51,18 +65,45 @@ export default function BentoGrid({ blocks, isEditable, onUpdateBlock, onAddBloc
     }
   };
 
+  const isValidPosition = (x: number, y: number, w: number, h: number, blockId: string) => {
+    // Check grid bounds
+    if (x + w > 6 || y + h > 4) return false;
+  
+    // Check if position is occupied by other blocks
+    return !localBlocks.some(block => 
+      block.id !== blockId && // Ignore self
+      x < block.position.x + block.position.w &&
+      x + w > block.position.x &&
+      y < block.position.y + block.position.h &&
+      y + h > block.position.y
+    );
+  };
+
   const handleBlockDrop = async (x: number, y: number, blockId: string) => {
     try {
-      // Update server first
+      const currentBlock = localBlocks.find(block => block.id === blockId);
+      if (!currentBlock) return;
+  
+      // Check if new position is valid
+      if (!isValidPosition(x, y, currentBlock.position.w, currentBlock.position.h, blockId)) {
+        return; // Cancel drop if invalid
+      }
+  
+      const updatedPosition = { 
+        x, 
+        y, 
+        w: currentBlock.position.w,
+        h: currentBlock.position.h
+      };
+  
       await onUpdateBlock(blockId, { 
-        position: { x, y, w: 1, h: 1 } 
+        position: updatedPosition
       });
       
-      // Then update local state
       setLocalBlocks(current =>
         current.map(block =>
           block.id === blockId 
-            ? { ...block, position: { x, y, w: 1, h: 1 } }
+            ? { ...block, position: updatedPosition }
             : block
         )
       );
@@ -93,34 +134,74 @@ export default function BentoGrid({ blocks, isEditable, onUpdateBlock, onAddBloc
     setResizeStartPos({ x: e.clientX, y: e.clientY });
   };
   
-  const handleResizeMove = (e: MouseEvent) => {
+  const handleResizeMove = useCallback((e: MouseEvent) => {
     if (!isResizing || !resizeStartPos || !resizingBlock) return;
     
     const deltaX = Math.floor((e.clientX - resizeStartPos.x) / 200);
     const deltaY = Math.floor((e.clientY - resizeStartPos.y) / 200);
     
-    const newW = Math.max(1, Math.min(3, resizingBlock.position.w + deltaX));
-    const newH = Math.max(1, Math.min(3, resizingBlock.position.h + deltaY));
+    const newW = resizingBlock.position.w + deltaX;
+    const newH = resizingBlock.position.h + deltaY;
     
-    const validSizes = [
-      {w: 1, h: 1}, {w: 1, h: 2}, {w: 2, h: 1},
-      {w: 2, h: 2}, {w: 2, h: 3}, {w: 3, h: 1}
-    ];
+    const closestSize = VALID_SIZES.reduce((closest, size) => {
+      const currentDiff = Math.abs(size.w - newW) + Math.abs(size.h - newH);
+      const closestDiff = Math.abs(closest.w - newW) + Math.abs(closest.h - newH);
+      return currentDiff < closestDiff ? size : closest;
+    });
+  
+    setResizePreview(closestSize);
     
-    const newSize = validSizes.find(size => size.w === newW && size.h === newH);
-    if (newSize) {
-      handleBlockUpdate(resizingBlock.id, {
-        position: { ...resizingBlock.position, w: newSize.w, h: newSize.h }
-      });
+    // Update local state immediately
+    if (isValidPosition(
+      resizingBlock.position.x, 
+      resizingBlock.position.y, 
+      closestSize.w, 
+      closestSize.h,
+      resizingBlock.id
+    )) {
+      // Clear existing timer
+      if (debounceTimer.current) {
+        clearTimeout(debounceTimer.current);
+      }
+
+      // Set local state immediately
+      setLocalBlocks(current =>
+        current.map(block =>
+          block.id === resizingBlock.id
+            ? {
+                ...block,
+                position: {
+                  ...block.position,
+                  w: closestSize.w,
+                  h: closestSize.h
+                }
+              }
+            : block
+        )
+      );
+
+      // Debounce server update
+      debounceTimer.current = setTimeout(() => {
+        onUpdateBlock(resizingBlock.id, {
+          position: {
+            ...resizingBlock.position,
+            w: closestSize.w,
+            h: closestSize.h
+          }
+        });
+      }, 100); // Adjust debounce delay as needed
     }
-  };
+  }, [isResizing, resizeStartPos, resizingBlock, onUpdateBlock, isValidPosition]);
+
+  
   
   // Update handleResizeEnd
-  const handleResizeEnd = () => {
+  const handleResizeEnd = useCallback(() => {
     setIsResizing(false);
     setResizeStartPos(null);
     setResizingBlock(null);
-  };
+    setResizePreview(null);
+  }, []);
 
   useEffect(() => {
     const localBlocksJSON = JSON.stringify(localBlocks);
@@ -146,11 +227,19 @@ export default function BentoGrid({ blocks, isEditable, onUpdateBlock, onAddBloc
       window.removeEventListener('mousemove', handleResizeMove);
       window.removeEventListener('mouseup', handleResizeEnd);
     }
-  }, [isResizing, resizingBlock, resizeStartPos]);
+  }, [isResizing, handleResizeMove, handleResizeEnd]);
+
+  useEffect(() => {
+    return () => {
+      if (debounceTimer.current) {
+        clearTimeout(debounceTimer.current);
+      }
+    };
+  }, []);
 
   return (
     <div className="flex flex-col items-center w-full">
-      <div className="grid gap-4 w-[90vw] max-w-[1280px]" style={{
+      <div className="grid gap-4 w-[90vw] max-w-[1280px] relative" style={{
         display: 'grid',
         gridTemplateColumns: 'repeat(6, minmax(0, 200px))',
         gridTemplateRows: 'repeat(4, 200px)',
@@ -159,6 +248,23 @@ export default function BentoGrid({ blocks, isEditable, onUpdateBlock, onAddBloc
         padding: '1rem',
         borderRadius: '0.5rem',
       }}>
+        {/* Resize Preview Overlay */}
+        {isResizing && resizingBlock && resizePreview && (
+          <div
+            className="absolute pointer-events-none transition-all duration-150"
+            style={{
+              gridColumn: `${resizingBlock.position.x + 1} / span ${resizePreview.w}`,
+              gridRow: `${resizingBlock.position.y + 1} / span ${resizePreview.h}`,
+              background: 'rgba(255, 255, 255, 0.15)',
+              border: '3px dashed rgba(255, 255, 255, 0.5)',
+              zIndex: 50,
+              borderRadius: '0.5rem',
+              margin: '0.5rem'
+            }}
+          />
+        )}
+  
+        {/* Blocks */}
         {localBlocks.map(block => (
           <div
             key={block.id}
@@ -178,7 +284,11 @@ export default function BentoGrid({ blocks, isEditable, onUpdateBlock, onAddBloc
             }}
             onDragEnd={() => setIsDragging(false)}
           >
-            <Block block={block} isEditable={isEditable} />
+            <Block 
+              block={block} 
+              isEditable={isEditable} 
+              onUpdateContent={handleUpdateContent}
+            />
             
             {isEditable && hoveredBlockId === block.id && !block.isCenter && (
               <>
@@ -200,7 +310,7 @@ export default function BentoGrid({ blocks, isEditable, onUpdateBlock, onAddBloc
                             key={type}
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleBlockUpdate(block.id, { type });
+                              onUpdateBlock(block.id, { type });
                               setShowTypeList(null);
                             }}
                             className={`block w-full px-4 py-2 text-sm text-left hover:bg-neutral-700 ${
@@ -213,13 +323,13 @@ export default function BentoGrid({ blocks, isEditable, onUpdateBlock, onAddBloc
                       </div>
                     )}
                   </div>
-
+  
                   <button 
                     onClick={() => {
                       const newColor = block.style.backgroundColor === 'rgb(23, 23, 23)' 
                         ? 'rgb(38, 38, 38)' 
                         : 'rgb(23, 23, 23)';
-                      handleBlockUpdate(block.id, { 
+                      onUpdateBlock(block.id, { 
                         style: { ...block.style, backgroundColor: newColor } 
                       });
                     }}
@@ -227,7 +337,7 @@ export default function BentoGrid({ blocks, isEditable, onUpdateBlock, onAddBloc
                   >
                     <FiDroplet size={14} />
                   </button>
-
+  
                   <button
                     onClick={() => handleDeleteBlock(block.id)}
                     className="p-1.5 rounded hover:bg-neutral-700 text-red-400"
@@ -240,7 +350,8 @@ export default function BentoGrid({ blocks, isEditable, onUpdateBlock, onAddBloc
             )}
           </div>
         ))}
-
+  
+        {/* Empty Cells */}
         {isEditable && gridCells.flat().map((cell) => !cell.occupied && (
           <div
             key={`${cell.x}-${cell.y}`}
@@ -250,7 +361,6 @@ export default function BentoGrid({ blocks, isEditable, onUpdateBlock, onAddBloc
             style={{
               gridColumn: `${cell.x + 1}`,
               gridRow: `${cell.y + 1}`,
-              opacity: '1'
             }}
             onMouseEnter={() => !isDragging && setHoveredEmptyCell(cell)}
             onMouseLeave={() => !isDragging && setHoveredEmptyCell(null)}

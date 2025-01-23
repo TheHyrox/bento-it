@@ -3,7 +3,7 @@ import { getServerSession } from 'next-auth/next';
 import { notFound } from 'next/navigation';
 import clientPromise from '@/lib/mongodb';
 import type { User } from '@/lib/types';
-import MenuBar from '@/components/MenuBar';
+import MenuBar from '@/components/Menubar';
 import ClientWrapper from '@/components/UserContent/ClientWrapper';
 
 async function UserPageContent({ username }: { username: string }) {
@@ -47,18 +47,16 @@ async function UserPageContent({ username }: { username: string }) {
 }
 
 export default async function UserPage({ params }: PageProps) {
-  if (!params?.username) {
+  const username = await params.username;
+  if (!username) {
     notFound();
   }
 
   return (
-    <>
-      <MenuBar />
-      <main className="min-h-screen p-8">
-        <Suspense fallback={<div>Loading...</div>}>
-          <UserPageContent username={params.username} />
-        </Suspense>
-      </main>
-    </>
+    <main className="min-h-screen p-8">
+      <Suspense fallback={<div>Loading...</div>}>
+        <UserPageContent username={username} />
+      </Suspense>
+    </main>
   );
 }
